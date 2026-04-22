@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:avatar_glow/avatar_glow.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:sanket/utils.dart' as utils;
 import 'package:translator/translator.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:flutter_typeahead/flutter_typeahead.dart';
+import 'package:provider/provider.dart';
 import 'history_manager.dart';
 import 'history_screen.dart';
 import 'quiz_screen.dart';
+import 'settings_screen.dart';
+import 'ocr_service.dart';
+import 'autocomplete_service.dart';
+import 'theme_manager.dart';
 
 class SpeechScreen extends StatefulWidget {
   const SpeechScreen({Key? key}) : super(key: key);
@@ -22,9 +30,14 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
   late AnimationController _imageAnimationController;
   late AnimationController _pulseController;
   late Animation<double> _scaleAnimation;
+  final OCRService _ocrService = OCRService();
+  final ImagePicker _imagePicker = ImagePicker();
+  final TextEditingController _textController = TextEditingController();
+  final FocusNode _textFocusNode = FocusNode();
 
   bool _isListening = false;
   bool _isTranslating = false;
+  bool _showTextInput = false;
   String _text = '';
   String _originalText = '';
   String _img = 'space';
@@ -34,6 +47,7 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
   int _state = 0;
   double _displaySpeed = 1.0;
   String _selectedLanguage = 'en';
+  List<String> _suggestions = [];
 
   final List<Map<String, String>> _languages = [
     {'code': 'en', 'name': 'English', 'flag': '🇬🇧'},
@@ -90,16 +104,22 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
     _imageAnimationController.dispose();
     _pulseController.dispose();
     _tts.stop();
+    _textController.dispose();
+    _textFocusNode.dispose();
+    _ocrService.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final themeManager = Provider.of<ThemeManager>(context);
+    final isDark = themeManager.themeMode == ThemeMode.dark;
+
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      backgroundColor: isDark ? const Color(0xFF121212) : Colors.grey[50],
       appBar: AppBar(
         elevation: 0,
-        backgroundColor: Colors.orange,
+        backgroundColor: themeManager.accentColor,
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -148,6 +168,16 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
               );
             },
           ),
+          IconButton(
+            icon: const Icon(Icons.settings, color: Colors.white),
+            tooltip: 'Settings',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
+          ),
         ],
       ),
       body: Stack(
@@ -165,7 +195,7 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                     margin: const EdgeInsets.all(16),
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
                       borderRadius: BorderRadius.circular(15),
                       boxShadow: [
                         BoxShadow(
@@ -177,7 +207,7 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.language, color: Colors.orange),
+                        Icon(Icons.language, color: themeManager.accentColor),
                         const SizedBox(width: 10),
                         const Text(
                           'Speak in:',
@@ -192,7 +222,7 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                             child: DropdownButton<String>(
                               value: _selectedLanguage,
                               isExpanded: true,
-                              icon: const Icon(Icons.arrow_drop_down, color: Colors.orange),
+                              icon: Icon(Icons.arrow_drop_down, color: themeManager.accentColor),
                               items: _languages.map((lang) {
                                 return DropdownMenuItem(
                                   value: lang['code'],
@@ -222,15 +252,171 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                     ),
                   ),
 
+                  // Multi-Modal Input Buttons
+                  Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 16),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                      borderRadius: BorderRadius.circular(15),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.05),
+                          blurRadius: 10,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      children: [
+                        const Text(
+                          'Input Methods',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _buildInputMethodButton(
+                              icon: Icons.text_fields,
+                              label: 'Text',
+                              onTap: () {
+                                setState(() {
+                                  _showTextInput = !_showTextInput;
+                                  if (_showTextInput) {
+                                    _textFocusNode.requestFocus();
+                                  }
+                                });
+                              },
+                              color: themeManager.accentColor,
+                            ),
+                            _buildInputMethodButton(
+                              icon: Icons.camera_alt,
+                              label: 'Camera',
+                              onTap: _pickImageFromCamera,
+                              color: themeManager.accentColor,
+                            ),
+                            _buildInputMethodButton(
+                              icon: Icons.photo_library,
+                              label: 'Gallery',
+                              onTap: _pickImageFromGallery,
+                              color: themeManager.accentColor,
+                            ),
+                            _buildInputMethodButton(
+                              icon: Icons.content_paste,
+                              label: 'Paste',
+                              onTap: _pasteFromClipboard,
+                              color: themeManager.accentColor,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Text Input Field with Autocomplete
+                  if (_showTextInput)
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                        borderRadius: BorderRadius.circular(15),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            blurRadius: 10,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          TypeAheadField<String>(
+                            controller: _textController,
+                            focusNode: _textFocusNode,
+                            builder: (context, controller, focusNode) {
+                              return TextField(
+                                controller: controller,
+                                focusNode: focusNode,
+                                decoration: InputDecoration(
+                                  hintText: 'Type text here...',
+                                  prefixIcon: Icon(Icons.edit, color: themeManager.accentColor),
+                                  suffixIcon: controller.text.isNotEmpty
+                                      ? IconButton(
+                                          icon: const Icon(Icons.clear),
+                                          onPressed: () {
+                                            controller.clear();
+                                            setState(() {});
+                                          },
+                                        )
+                                      : null,
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                    borderSide: BorderSide(color: themeManager.accentColor),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                    borderSide: BorderSide(color: themeManager.accentColor, width: 2),
+                                  ),
+                                ),
+                                onChanged: (value) {
+                                  setState(() {});
+                                },
+                              );
+                            },
+                            suggestionsCallback: (pattern) async {
+                              return AutocompleteService.getSuggestions(pattern);
+                            },
+                            itemBuilder: (context, String suggestion) {
+                              return ListTile(
+                                leading: Icon(Icons.text_fields, color: themeManager.accentColor, size: 20),
+                                title: Text(suggestion),
+                              );
+                            },
+                            onSelected: (String suggestion) {
+                              final words = _textController.text.split(' ');
+                              if (words.isNotEmpty) {
+                                words[words.length - 1] = suggestion;
+                                _textController.text = words.join(' ') + ' ';
+                                _textController.selection = TextSelection.fromPosition(
+                                  TextPosition(offset: _textController.text.length),
+                                );
+                              }
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          ElevatedButton.icon(
+                            onPressed: _textController.text.isEmpty ? null : _translateTextInput,
+                            icon: const Icon(Icons.translate, color: Colors.white),
+                            label: const Text('Translate to ISL', style: TextStyle(color: Colors.white)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: themeManager.accentColor,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (_showTextInput) const SizedBox(height: 16),
+
                   // Sign image display with beautiful container
                   Container(
                     margin: const EdgeInsets.symmetric(horizontal: 16),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.orange.withOpacity(0.1),
+                          color: themeManager.accentColor.withOpacity(0.1),
                           blurRadius: 20,
                           offset: const Offset(0, 5),
                         ),
@@ -291,36 +477,48 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        colors: [Colors.orange[50]!, Colors.orange[100]!],
+                        colors: isDark
+                            ? [const Color(0xFF2A2A2A), const Color(0xFF1E1E1E)]
+                            : [themeManager.accentColor.withOpacity(0.1), themeManager.accentColor.withOpacity(0.2)],
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                       ),
                       borderRadius: BorderRadius.circular(15),
-                      border: Border.all(color: Colors.orange[200]!, width: 2),
+                      border: Border.all(color: themeManager.accentColor.withOpacity(0.3), width: 2),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
                           children: [
-                            Icon(Icons.text_fields, color: Colors.orange[700], size: 20),
+                            Icon(Icons.text_fields, color: themeManager.accentColor, size: 20),
                             const SizedBox(width: 8),
                             Text(
                               'Translation:',
                               style: TextStyle(
                                 fontSize: 14,
                                 fontWeight: FontWeight.bold,
-                                color: Colors.orange[700],
+                                color: themeManager.accentColor,
                               ),
                             ),
                             const Spacer(),
                             if (_displaytext.isNotEmpty &&
                                 _displaytext != 'Tap the mic and start speaking...')
-                              IconButton(
-                                icon: const Icon(Icons.volume_up, color: Colors.orange),
-                                iconSize: 20,
-                                onPressed: () => _tts.speak(_text),
-                                tooltip: 'Speak',
+                              Row(
+                                children: [
+                                  IconButton(
+                                    icon: Icon(Icons.volume_up, color: themeManager.accentColor),
+                                    iconSize: 20,
+                                    onPressed: () => _tts.speak(_text),
+                                    tooltip: 'Speak',
+                                  ),
+                                  IconButton(
+                                    icon: Icon(Icons.share, color: themeManager.accentColor),
+                                    iconSize: 20,
+                                    onPressed: _shareTranslation,
+                                    tooltip: 'Share',
+                                  ),
+                                ],
                               ),
                           ],
                         ),
@@ -364,7 +562,7 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                     margin: const EdgeInsets.symmetric(horizontal: 16),
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
                       borderRadius: BorderRadius.circular(15),
                       boxShadow: [
                         BoxShadow(
@@ -392,14 +590,14 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                                 vertical: 4,
                               ),
                               decoration: BoxDecoration(
-                                color: Colors.orange[100],
+                                color: themeManager.accentColor.withOpacity(0.2),
                                 borderRadius: BorderRadius.circular(20),
                               ),
                               child: Text(
                                 '${_displaySpeed.toStringAsFixed(1)}x',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontWeight: FontWeight.bold,
-                                  color: Colors.orange,
+                                  color: themeManager.accentColor,
                                 ),
                               ),
                             ),
@@ -414,8 +612,8 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
                                 min: 0.5,
                                 max: 2.0,
                                 divisions: 6,
-                                activeColor: Colors.orange,
-                                inactiveColor: Colors.orange[100],
+                                activeColor: themeManager.accentColor,
+                                inactiveColor: themeManager.accentColor.withOpacity(0.3),
                                 onChanged: (value) {
                                   setState(() => _displaySpeed = value);
                                 },
@@ -487,14 +685,14 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       floatingActionButton: AvatarGlow(
         animate: _isListening,
-        glowColor: Colors.orange,
+        glowColor: themeManager.accentColor,
         endRadius: 80.0,
         duration: const Duration(milliseconds: 2000),
         repeatPauseDuration: const Duration(milliseconds: 100),
         repeat: true,
         child: FloatingActionButton.large(
           onPressed: _listen,
-          backgroundColor: _isListening ? Colors.red : Colors.orange,
+          backgroundColor: _isListening ? Colors.red : themeManager.accentColor,
           elevation: 8,
           child: Icon(
             _isListening ? Icons.mic : Icons.mic_none,
@@ -707,8 +905,187 @@ class _SpeechScreenState extends State<SpeechScreen> with TickerProviderStateMix
         _ext = '.png';
       });
       await Future.delayed(Duration(milliseconds: (1000 / _displaySpeed).round()));
-
     }
+  }
+
+  // New helper method for input method buttons
+  Widget _buildInputMethodButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    required Color color,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.3)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // OCR from camera
+  Future<void> _pickImageFromCamera() async {
+    try {
+      final XFile? image = await _imagePicker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 85,
+      );
+
+      if (image != null) {
+        setState(() => _isTranslating = true);
+
+        String extractedText = await _ocrService.extractTextFromImage(image.path);
+
+        if (extractedText.isNotEmpty) {
+          _textController.text = extractedText;
+          setState(() => _isTranslating = false);
+          _showSnackBar('Text extracted successfully!', Colors.green);
+        } else {
+          setState(() => _isTranslating = false);
+          _showSnackBar('No text found in image', Colors.orange);
+        }
+      }
+    } catch (e) {
+      setState(() => _isTranslating = false);
+      _showSnackBar('Error: ${e.toString()}', Colors.red);
+    }
+  }
+
+  // OCR from gallery
+  Future<void> _pickImageFromGallery() async {
+    try {
+      final XFile? image = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 85,
+      );
+
+      if (image != null) {
+        setState(() => _isTranslating = true);
+
+        String extractedText = await _ocrService.extractTextFromImage(image.path);
+
+        if (extractedText.isNotEmpty) {
+          _textController.text = extractedText;
+          setState(() => _isTranslating = false);
+          _showSnackBar('Text extracted successfully!', Colors.green);
+        } else {
+          setState(() => _isTranslating = false);
+          _showSnackBar('No text found in image', Colors.orange);
+        }
+      }
+    } catch (e) {
+      setState(() => _isTranslating = false);
+      _showSnackBar('Error: ${e.toString()}', Colors.red);
+    }
+  }
+
+  // Paste from clipboard
+  Future<void> _pasteFromClipboard() async {
+    try {
+      ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+
+      if (data != null && data.text != null && data.text!.isNotEmpty) {
+        _textController.text = data.text!;
+        setState(() {
+          _showTextInput = true;
+        });
+        _showSnackBar('Text pasted successfully!', Colors.green);
+      } else {
+        _showSnackBar('Clipboard is empty', Colors.orange);
+      }
+    } catch (e) {
+      _showSnackBar('Error pasting from clipboard', Colors.red);
+    }
+  }
+
+  // Translate text input
+  Future<void> _translateTextInput() async {
+    String inputText = _textController.text.trim();
+
+    if (inputText.isEmpty) return;
+
+    setState(() {
+      _isTranslating = true;
+      _text = inputText;
+      _originalText = inputText;
+    });
+
+    // Save to history
+    await HistoryManager.saveTranslation(inputText);
+
+    // Translate if needed
+    if (_selectedLanguage != 'en') {
+      try {
+        var translationResult = await _translator.translate(
+          inputText,
+          from: _selectedLanguage,
+          to: 'en',
+        );
+        setState(() {
+          _text = translationResult.text;
+          _originalText = inputText;
+        });
+      } catch (e) {
+        print('Translation error: $e');
+      }
+    }
+
+    // Perform translation
+    await translation(_text);
+
+    setState(() {
+      _isTranslating = false;
+      _showTextInput = false;
+    });
+
+    // Hide keyboard
+    _textFocusNode.unfocus();
+  }
+
+  // Share translation
+  Future<void> _shareTranslation() async {
+    if (_text.isNotEmpty) {
+      try {
+        await Clipboard.setData(ClipboardData(text: _text));
+        _showSnackBar('Copied to clipboard!', Colors.green);
+      } catch (e) {
+        _showSnackBar('Error sharing text', Colors.red);
+      }
+    }
+  }
+
+  // Show snackbar helper
+  void _showSnackBar(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
   }
 
 }
